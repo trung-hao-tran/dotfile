@@ -6,6 +6,7 @@ Personal dotfiles and nerd fonts.
 
 - `config/mimeapps.list` — default apps (Firefox as default browser)
 - `config/otter-launcher/config.toml` — otter-launcher config
+- `local/bin/launcher` — fsel-based command launcher (bound to `$mod+r` via `toggle-launcher`), includes the `wifi` module
 - `fonts/` — Nerd Fonts (DepartureMono, Hack, AnonymousPro, FiraCode, GeistMono)
 
 ## Install
@@ -13,6 +14,7 @@ Personal dotfiles and nerd fonts.
 ```sh
 cp config/mimeapps.list ~/.config/mimeapps.list
 cp -r config/otter-launcher ~/.config/
+cp local/bin/launcher ~/.local/bin/launcher && chmod +x ~/.local/bin/launcher
 mkdir -p ~/.local/share/fonts
 cp -r fonts/. ~/.local/share/fonts/
 fc-cache -f

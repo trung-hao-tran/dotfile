@@ -1,0 +1,215 @@
+#!/bin/bash
+# launcher — fsel-based command launcher
+
+FSEL="$HOME/.local/bin/fsel"
+CCLIP="$HOME/.local/bin/cclip"
+TAB=$'\t'
+
+wifi_menu() {
+    local ssid
+    ssid="$(
+        nmcli -t -f SSID,SIGNAL device wifi list 2>/dev/null |
+        sed '/^[[:space:]]*$/d; /^:/d' |
+        sort -t: -k2 -rn |
+        awk -F: '!seen[$1]++ && $1 != "" { printf "%-34s  %s%%\n", $1, $2 }' |
+        "$FSEL" --dmenu |
+        sed -E 's/[[:space:]]+[0-9]+%$//'
+    )"
+    [ -z "$ssid" ] && return
+    if nmcli connection up "$ssid" >/dev/null 2>&1; then
+        printf "Connected to %s\n" "$ssid"
+    else
+        printf "Password for %s: " "$ssid"
+        stty -echo; read -r pass < /dev/tty; stty echo; echo
+        nmcli device wifi connect "$ssid" password "$pass"
+    fi
+    printf "\nPress Enter..."; read -r _ < /dev/tty
+}
+
+yt_menu() {
+    local query="$1" tmp selection n vid
+    local mpv_args=""
+    if [ -z "$query" ]; then
+        printf "YouTube search (prefix 'a ' for audio only): "; read -r query < /dev/tty
+        [ -z "$query" ] && return
+    fi
+    if [ "${query#a }" != "$query" ]; then
+        query="${query#a }"
+        mpv_args="--no-video"
+    fi
+    tmp="$(mktemp)"
+    printf "Searching: %s\n" "$query"
+    yt-dlp --flat-playlist --print '%(id)s|%(title)s' "ytsearch20:${query}" >"$tmp" 2>/dev/null
+    if [ ! -s "$tmp" ]; then
+        printf "No results.\nPress Enter..."; read -r _ < /dev/tty
+        rm -f "$tmp"; return
+    fi
+    selection="$(
+        awk -F'|' '{
+            t = $2
+            if (length(t) > 68) t = substr(t, 1, 68) "..."
+            printf "%02d  %s\n", NR, t
+        }' "$tmp" | "$FSEL" --dmenu
+    )"
+    n="$(awk '{print $1+0}' <<< "$selection")"
+    vid="$(awk -F'|' -v n="$n" 'NR==n{print $1}' "$tmp")"
+    rm -f "$tmp"
+    [ -n "$vid" ] && WAYLAND_DISPLAY="$WAYLAND_DISPLAY" swaymsg "exec mpv $mpv_args 'ytdl://https://www.youtube.com/watch?v=$vid'"
+}
+
+kill_menu() {
+    local app
+    app="$(ps -u "$USER" -o comm= | sort -u | "$FSEL" --dmenu)"
+    [ -n "$app" ] && pkill -9 "$app" && printf "Killed: %s\n" "$app" && sleep 0.5
+}
+
+power_menu() {
+    local choice
+    choice="$(printf 'reboot\nshutdown\nlogout\nsuspend\nhibernate' | "$FSEL" --dmenu)"
+    case "$choice" in
+        logout)    loginctl terminate-session "$(loginctl session-status | head -1 | awk '{print $1}')" ;;
+        suspend)   systemctl suspend ;;
+        hibernate) systemctl hibernate ;;
+        reboot)    systemctl reboot ;;
+        shutdown)  systemctl poweroff ;;
+    esac
+}
+
+install_pkg() {
+    local pkg="$1"
+    [ -z "$pkg" ] && { printf "Package: "; read -r pkg < /dev/tty; }
+    [ -z "$pkg" ] && return
+    if flatpak remote-info --user flathub "$pkg" >/dev/null 2>&1 ||
+       flatpak remote-info flathub "$pkg" >/dev/null 2>&1; then
+        setsid -f foot sh -lc "flatpak install --user flathub '$pkg'; printf '\nPress Enter...'; read _" >/dev/null 2>&1 &
+    else
+        setsid -f foot sh -lc "sudo dnf install '$pkg'; printf '\nPress Enter...'; read _" >/dev/null 2>&1 &
+    fi
+}
+
+font_menu() {
+    local font size
+    size="$(grep '^font=' ~/.config/foot/foot.ini | grep -oP 'size=\K[0-9]+' | head -1)"
+    size="${size:-14}"
+    font="$(
+        fc-list : family spacing | grep 'spacing=100' |
+        awk -F: '{n=$1; gsub(/^ +| +$/,"",n); gsub(/,.*/,"",n); print n}' |
+        sort -u | "$FSEL" --dmenu
+    )"
+    [ -z "$font" ] && return
+    sed -i "s/^font=.*/font=${font}:size=${size}/" ~/.config/foot/foot.ini
+    printf "Font set to: %s (size %s)\nNew terminals will use it.\nPress Enter..." "$font" "$size"
+    read -r _ < /dev/tty
+}
+
+flatpak_search() {
+    local query="$1" result appid
+    [ -z "$query" ] && { printf "Search flatpak: "; read -r query < /dev/tty; }
+    [ -z "$query" ] && return
+    result="$(
+        flatpak search --columns=application,name,description "$query" 2>/dev/null |
+        sed '/^$/d' |
+        "$FSEL" --dmenu
+    )"
+    [ -z "$result" ] && return
+    appid="$(awk '{print $1}' <<< "$result")"
+    [ -n "$appid" ] && install_pkg "$appid"
+}
+
+run_in_terminal() {
+    local cmd="$1"
+    printf -v quoted '%q' "$cmd"
+    swaymsg "exec foot $HOME/.local/bin/run-command-terminal $quoted" >/dev/null 2>&1
+}
+
+run_command_menu() {
+    local arg="$1"
+    printf '[%s] s arg before menu: <%s>\n' "$(date '+%F %T')" "$arg" >>"$HOME/.cache/launcher-s.log"
+    if [ -z "$arg" ]; then
+        arg="$(
+            "$CCLIP" list 2>>"$HOME/.cache/launcher-s.log" |
+            while IFS="$TAB" read -r _id mime data; do
+                case "$mime" in
+                    text/*) printf '%s\n' "$data" ;;
+                esac
+            done |
+            "$FSEL" --dmenu
+        )"
+        printf '[%s] s arg after menu: <%s>\n' "$(date '+%F %T')" "$arg" >>"$HOME/.cache/launcher-s.log"
+    fi
+    if [ -z "$arg" ]; then
+        printf '[%s] s empty result, returning\n' "$(date '+%F %T')" >>"$HOME/.cache/launcher-s.log"
+        return
+    fi
+    printf '[%s] s running: <%s>\n' "$(date '+%F %T')" "$arg" >>"$HOME/.cache/launcher-s.log"
+    run_in_terminal "$arg"
+}
+
+SHORTCUTS="$(cat <<EOF
+a${TAB}launch apps
+br${TAB}search brave
+cl${TAB}clipboard history
+ft${TAB}change terminal font
+i${TAB}install package
+k${TAB}kill app
+p${TAB}power menu
+s${TAB}run in terminal
+sr${TAB}search flatpak
+wifi${TAB}connect to wifi
+yt${TAB}youtube search
+EOF
+)"
+
+sel="$(printf '%s\n' "$SHORTCUTS" | "$FSEL" --dmenu --delimiter "$TAB" --with-nth 1,2)"
+[ -z "$sel" ] && exit 0
+
+if printf '%s' "$sel" | grep -q "$TAB"; then
+    prefix="$(printf '%s' "$sel" | cut -f1)"
+    arg=""
+else
+    prefix="${sel%% *}"
+    arg="${sel#"$prefix"}"
+    arg="${arg# }"
+fi
+
+case "$prefix" in
+    a)
+        "$FSEL" -d -r ${arg:+-ss "$arg"}
+        ;;
+    br)
+        [ -z "$arg" ] && { printf "Search: "; read -r arg < /dev/tty; }
+        [ -z "$arg" ] && exit 0
+        encoded="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$arg")"
+        setsid -f librewolf "https://search.brave.com/search?q=${encoded}" >/dev/null 2>&1 &
+        ;;
+    cl)
+        "$FSEL" --cclip
+        ;;
+    ft)
+        font_menu
+        ;;
+    i)
+        install_pkg "$arg"
+        ;;
+    k)
+        kill_menu
+        ;;
+    p)
+        power_menu
+        ;;
+    s)
+        run_command_menu "$arg"
+        ;;
+    sr)
+        flatpak_search "$arg"
+        ;;
+    wifi)
+        wifi_menu
+        ;;
+    yt)
+        yt_menu "$arg"
+        ;;
+    *)
+        "$FSEL" -d -r -ss "$sel"
+        ;;
+esac
